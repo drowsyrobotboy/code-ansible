@@ -1,0 +1,306 @@
+---
+- name: Configure Fedora Desktop for robotboy-code
+  hosts: localhost
+  connection: local # Explicitly state local connection
+  become: yes # Most tasks require root privileges
+
+  vars:
+    target_hostname: robotboy-code
+    # User for whom user-specific configurations (like icons, docker group, NVM) will be applied.
+    # This is the user running the ansible-playbook command.
+    ansible_user_to_configure: "{{ lookup('env', 'USER') }}"
+    user_home_to_configure: "{{ lookup('env', 'HOME') }}"
+    nvm_version: "v0.40.3" # Specific NVM version from user request
+    node_version_to_install: "22" # Specific Node.js major version from user request
+
+  tasks:
+    - name: Ensure prerequisite packages for repository management are present
+      ansible.builtin.dnf:
+        name:
+          - dnf-plugins-core
+          - curl # Needed for downloading NVM script
+          - git # Needed by NVM install script
+        state: present
+
+    # 1. Set Hostname
+    - name: Set system hostname to {{ target_hostname }}
+      ansible.builtin.hostname:
+        name: "{{ target_hostname }}"
+      notify: Reboot system for hostname # Optional: notify a handler to reboot
+
+    # 2. Install Gnome Desktop & set graphical target
+    - name: Install GNOME Desktop Environment
+      ansible.builtin.dnf:
+        name: "@gnome-desktop" # Group install
+        state: present
+    - name: Set default system target to graphical
+      ansible.builtin.systemd:
+        name: graphical.target
+        enabled: yes
+        masked: no # Ensure it's not masked
+
+    # 3. Install Gnome utilities and extensions
+    - name: Install GNOME Tweaks, Extensions App, and Shell Extensions
+      ansible.builtin.dnf:
+        name:
+          - gnome-tweaks
+          - gnome-extensions-app
+          - gnome-shell-extension-dash-to-panel # Common package name
+          - gnome-shell-extension-system-monitor # Common package name for system monitor applet
+        state: present
+        # Note: User might need to manually enable extensions via GNOME Extensions app.
+
+    # 4. Install VMware tools (if applicable)
+    - name: Gather virtualization facts
+      ansible.builtin.setup:
+        filter: ansible_virtualization_type
+
+    - name: Install VMware Tools (open-vm-tools)
+      ansible.builtin.dnf:
+        name:
+          - open-vm-tools
+          - open-vm-tools-desktop # For GUI integration
+        state: present
+      when: ansible_facts.virtualization_type == "VMware"
+
+    # 5. Install Development Tools
+
+    - name: Install common development tools (git, golang, alacritty, rust)
+      ansible.builtin.dnf:
+        name:
+          - git
+          - golang                 # Go language
+          - alacritty              # Terminal emulator
+          - rust                   # Rust compiler
+          - cargo                  # Rust package manager
+          # nodejs and npm removed, will be installed via NVM
+        state: present
+
+    # NVM and Node.js Installation
+    - name: Check if NVM is already installed for user {{ ansible_user_to_configure }}
+      ansible.builtin.stat:
+        path: "{{ user_home_to_configure }}/.nvm/nvm.sh"
+      register: nvm_script_stat
+      become: yes # stat might need to look into home dir if run as root initially
+      become_user: "{{ ansible_user_to_configure }}"
+
+    - name: Download NVM installation script (version {{ nvm_version }})
+      ansible.builtin.get_url:
+        url: "https://raw.githubusercontent.com/nvm-sh/nvm/{{ nvm_version }}/install.sh"
+        dest: "/tmp/nvm_install.sh"
+        mode: '0755'
+      when: not nvm_script_stat.stat.exists
+
+    - name: Run NVM installation script for user {{ ansible_user_to_configure }}
+      ansible.builtin.shell:
+        cmd: "bash /tmp/nvm_install.sh"
+      environment: # NVM script needs HOME to be set correctly for the target user
+        HOME: "{{ user_home_to_configure }}"
+      become: yes
+      become_user: "{{ ansible_user_to_configure }}"
+      args:
+        creates: "{{ user_home_to_configure }}/.nvm/nvm.sh" # Idempotency: only run if nvm.sh doesn't exist
+      when: not nvm_script_stat.stat.exists # Only run if NVM script was downloaded (implies NVM not installed)
+      register: nvm_install_script_result
+      changed_when: "'is already installed' not in nvm_install_script_result.stdout_lines | join(' ')" # Crude check for change
+
+    - name: Ensure NVM is sourced in .bashrc for user {{ ansible_user_to_configure }}
+      ansible.builtin.blockinfile:
+        path: "{{ user_home_to_configure }}/.bashrc" # Assumes bash shell
+        create: yes
+        owner: "{{ ansible_user_to_configure }}"
+        group: "{{ ansible_user_to_configure }}" # Assumes user's primary group
+        mode: '0644'
+        marker: "# {mark} ANSIBLE MANAGED NVM BLOCK"
+        block: |
+          export NVM_DIR="$HOME/.nvm"
+          [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"  # This loads nvm
+          [ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"  # This loads nvm bash_completion
+      become: yes # Ensures root can write/chown the file if needed
+      # become_user: "{{ ansible_user_to_configure }}" # owner/group params handle this if blockinfile runs as root
+
+    - name: Install Node.js v{{ node_version_to_install }} and set as default using NVM
+      ansible.builtin.shell:
+        cmd: |
+          export NVM_DIR="{{ user_home_to_configure }}/.nvm"
+          [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+          nvm install {{ node_version_to_install }}
+          nvm alias default {{ node_version_to_install }}
+      args:
+        executable: /bin/bash # Crucial for `source` (or `\.`) to work
+      become: yes
+      become_user: "{{ ansible_user_to_configure }}"
+      when: nvm_script_stat.stat.exists # Only run if NVM is actually installed
+      register: node_install_result
+      changed_when: "'is already installed' not in node_install_result.stdout and ('Now using node' in node_install_result.stdout or 'default -> {{ node_version_to_install }}' in node_install_result.stdout)"
+      notify: Development tools path info # Remind user about shell restart for PATH changes
+
+    - name: Clean up NVM installation script from /tmp
+      ansible.builtin.file:
+        path: "/tmp/nvm_install.sh"
+        state: absent
+      when: not nvm_script_stat.stat.exists # Only if we downloaded it in this run (idempotency)
+
+    # Visual Studio Code
+    - name: Import Microsoft GPG key for VS Code
+      ansible.builtin.rpm_key:
+        state: present
+        key: https://packages.microsoft.com/keys/microsoft.asc
+    - name: Add VS Code repository
+      ansible.builtin.yum_repository:
+        name: vscode
+        description: Visual Studio Code
+        baseurl: https://packages.microsoft.com/yumrepos/vscode
+        enabled: yes
+        gpgcheck: yes
+        gpgkey: https://packages.microsoft.com/keys/microsoft.asc
+    - name: Install Visual Studio Code
+      ansible.builtin.dnf:
+        name: code
+        state: present
+
+    # Docker
+    - name: Add Docker GPG key
+      ansible.builtin.rpm_key:
+        state: present
+        key: https://download.docker.com/linux/fedora/gpg
+    - name: Add Docker CE repository
+      ansible.builtin.yum_repository:
+        name: docker-ce-stable
+        description: Docker CE Stable
+        baseurl: "https://download.docker.com/linux/fedora/{{ ansible_distribution_major_version }}/$basearch/stable"
+        enabled: yes
+        gpgcheck: yes
+        gpgkey: https://download.docker.com/linux/fedora/gpg
+    - name: Install Docker components
+      ansible.builtin.dnf:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+    - name: Ensure Docker service is enabled and started
+      ansible.builtin.systemd:
+        name: docker
+        enabled: yes
+        state: started
+    - name: Add user {{ ansible_user_to_configure }} to docker group
+      ansible.builtin.user:
+        name: "{{ ansible_user_to_configure }}"
+        groups: docker
+        append: yes
+      notify: Docker group info # Notify user about logout/login
+
+    # Tailscale
+    - name: Add Tailscale repository
+      ansible.builtin.yum_repository:
+        name: tailscale-stable
+        description: Tailscale stable
+        baseurl: "https://pkgs.tailscale.com/stable/fedora/{{ ansible_distribution_major_version }}/$basearch"
+        enabled: yes
+        gpgcheck: yes
+        gpgkey: https://pkgs.tailscale.com/stable/fedora/repo.gpg
+    - name: Install Tailscale
+      ansible.builtin.dnf:
+        name: tailscale
+        state: present
+    - name: Ensure Tailscale service is enabled
+      ansible.builtin.systemd:
+        name: tailscaled
+        enabled: yes
+        # state: started # Starting tailscaled usually requires `tailscale up` interactively or with auth key.
+      notify: Tailscale setup info
+
+    # 6. Install Browser based on architecture
+    - name: Gather architecture facts
+      ansible.builtin.setup:
+        filter: ansible_architecture
+
+    - name: Install Google Chrome (for x86_64 architecture)
+      block:
+        - name: Add Google Chrome repository
+          ansible.builtin.yum_repository:
+            name: google-chrome
+            description: Google Chrome
+            baseurl: http://dl.google.com/linux/chrome/rpm/stable/$basearch # $basearch will be x86_64
+            enabled: yes
+            gpgcheck: yes
+            gpgkey: https://dl.google.com/linux/linux_signing_key.pub
+        - name: Install Google Chrome Stable
+          ansible.builtin.dnf:
+            name: google-chrome-stable
+            state: present
+      when: ansible_facts.architecture == "x86_64"
+
+    - name: Install Chromium (for non-x86_64 architectures, e.g., aarch64)
+      ansible.builtin.dnf:
+        name: chromium
+        state: present
+      when: ansible_facts.architecture != "x86_64"
+
+    # 7. Download and install Papyrus icon theme for the user
+    - name: Ensure .icons directory exists for user {{ ansible_user_to_configure }}
+      ansible.builtin.file:
+        path: "{{ user_home_to_configure }}/.icons"
+        state: directory
+        mode: '0755'
+        owner: "{{ ansible_user_to_configure }}"
+        group: "{{ ansible_user_to_configure }}"
+      become: true # May need root to create in user's home if script runs as root initially
+
+    - name: Download Papyrus icon theme installer script
+      ansible.builtin.get_url:
+        url: https://raw.githubusercontent.com/PapirusDevelopmentTeam/papirus-icon-theme/master/install.sh
+        dest: /tmp/papirus-install.sh
+        mode: '0755'
+      register: papyrus_installer_download
+
+    - name: Check if Papyrus icon theme is already installed
+      ansible.builtin.stat:
+        path: "{{ user_home_to_configure }}/.icons/Papirus/AUTHORS" # A file within the theme directory
+      register: papyrus_theme_stat
+      become: yes
+      become_user: "{{ ansible_user_to_configure }}"
+
+    - name: Install Papyrus icon theme for user {{ ansible_user_to_configure }} if not present
+      ansible.builtin.shell:
+        cmd: "/tmp/papirus-install.sh --dest {{ user_home_to_configure }}/.icons --theme Papirus"
+      become: yes
+      become_user: "{{ ansible_user_to_configure }}"
+      environment:
+        HOME: "{{ user_home_to_configure }}"
+        USER: "{{ ansible_user_to_configure }}"
+      args:
+        chdir: "{{ user_home_to_configure }}"
+        creates: "{{ user_home_to_configure }}/.icons/Papirus/AUTHORS"
+      when: not papyrus_theme_stat.stat.exists
+
+    - name: Clean up Papyrus installer script
+      ansible.builtin.file:
+        path: /tmp/papirus-install.sh
+        state: absent
+
+  handlers:
+    - name: Docker group info
+      ansible.builtin.debug:
+        msg: "User {{ ansible_user_to_configure }} has been added to the docker group. You may need to log out and log back in for this change to take effect."
+
+    - name: Tailscale setup info
+      ansible.builtin.debug:
+        msg: "Tailscale installed and service enabled. Run 'sudo tailscale up' to connect to your Tailnet."
+
+    - name: Development tools path info
+      ansible.builtin.debug:
+        msg: "NVM, Node.js, Rust, and Go have been installed. NVM has configured your .bashrc. You may need to restart your terminal or source your shell profile (e.g., .bashrc) for changes to be fully effective in your current shell."
+
+    - name: Reboot system for hostname
+      ansible.builtin.reboot:
+        msg: "Rebooting to apply hostname changes and complete setup."
+        connect_timeout: 5
+        reboot_timeout: 600
+        pre_reboot_delay: 0
+        post_reboot_delay: 30
+        test_command: whoami
+      when: false # Set to true if you want automatic reboot after hostname change. Defaulting to false.
