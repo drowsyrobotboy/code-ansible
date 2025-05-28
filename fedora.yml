@@ -72,7 +72,7 @@
     # 5. Install Development Tools
 
     # Git setup
-    - name: Set Git global configuration for {{ ansible_user_to_configure }}
+    - name: Set Git global configuration
       ansible.community.git_config:
         name: "{{ item.name }}"
         scope: global
