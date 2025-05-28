@@ -72,17 +72,21 @@
     # 5. Install Development Tools
 
     # Git setup
-    - name: Set Git global configuration
-      ansible.community.git_config:
-        name: "{{ item.name }}"
-        scope: global
-        value: "{{ item.value }}"
-      loop:
-        - { name: 'user.name', value: 'drowsyrobotboy' }
-        - { name: 'user.email', value: 'maruthisharma@live.in' }
-        - { name: 'init.defaultBranch', value: 'main' }
+    - name: Set Git user name
+      ansible.builtin.command: git config --global user.name "drowsyrobotboy"
       become: yes
       become_user: "{{ ansible_user_to_configure }}"
+    
+    - name: Set Git user email
+      ansible.builtin.command: git config --global user.email "maruthisharma@live.in"
+      become: yes
+      become_user: "{{ ansible_user_to_configure }}"
+    
+    - name: Set Git default branch to main
+      ansible.builtin.command: git config --global init.defaultBranch main
+      become: yes
+      become_user: "{{ ansible_user_to_configure }}"
+
       
     # Zig, Go & Alacritty terminal installation
     - name: Install Go and Alactritty from DNF
@@ -91,6 +95,28 @@
           - zig                    # Zig Language
           - golang                 # Go language
           - alacritty              # Terminal emulator
+        state: present
+
+    # Install Rust
+
+    - name: Check if Rust is already installed
+      ansible.builtin.command: rustc --version
+      register: rustc_check
+      ignore_errors: yes
+    
+    - name: Download and install Rust using rustup
+      ansible.builtin.shell: |
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+      args:
+        executable: /bin/bash
+      when: rustc_check.rc != 0
+      become: yes
+      become_user: "{{ ansible_user_to_configure }}"
+    
+    - name: Add cargo and rust to PATH (for current user session only)
+      ansible.builtin.lineinfile:
+        path: "/home/{{ ansible_user_to_configure }}/.bashrc"
+        line: 'export PATH="$HOME/.cargo/bin:$PATH"'
         state: present
         
     # NVM and Node.js Installation
