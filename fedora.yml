@@ -33,11 +33,8 @@
       ansible.builtin.dnf:
         name: "@gnome-desktop" # Group install
         state: present
-    - name: Set default system target to graphical
-      ansible.builtin.systemd:
-        name: graphical.target
-        enabled: yes
-        masked: no # Ensure it's not masked
+    - name: Set default systemd target to graphical
+      ansible.builtin.command: systemctl set-default graphical.target
 
     # 3. Install Gnome utilities and extensions
     - name: Install GNOME Tweaks, Extensions App, and Shell Extensions
