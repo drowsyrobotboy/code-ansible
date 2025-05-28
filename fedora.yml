@@ -71,16 +71,21 @@
 
     # 5. Install Development Tools
 
-    - name: Install common development tools (git, golang, alacritty, rust)
+    # Git setup
+    - name: Set Git Configuration
+      ansible.builtin.command: git config --global user.name "drowsyrobotboy" && git config --global user.email "maruthisharma@live.in" && git config --global init.defaultBranch main
+      
+    # Go & Alacritty terminal installation
+    - name: Install Go and Alactritty from DNF
       ansible.builtin.dnf:
         name:
-          - git
           - golang                 # Go language
           - alacritty              # Terminal emulator
-          - rust                   # Rust compiler
-          - cargo                  # Rust package manager
-          # nodejs and npm removed, will be installed via NVM
         state: present
+        
+    # Rust installation
+    - name: Install Rust and dependencies from official method
+      ansible.builtin.command: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
     # NVM and Node.js Installation
     - name: Check if NVM is already installed for user {{ ansible_user_to_configure }}
