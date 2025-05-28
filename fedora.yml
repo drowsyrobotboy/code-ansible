@@ -94,24 +94,11 @@
         
    # Rust installation
    - name: Install Rust for user {{ ansible_user_to_configure }}
-      ansible.builtin.shell:
-        # The `sh -s -- -y` part does the following:
-        # `sh -s`: Tells sh to read commands from standard input.
-        # `--`:  Signifies the end of options for `sh` itself.
-        # `-y`:  This flag is then passed to the rustup.sh script to run non-interactively.
-        cmd: "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
-      become: yes
-      become_user: "{{ ansible_user_to_configure }}"
-      environment:
-        # HOME and USER are important for rustup to install in the correct user's directory
-        HOME: "{{ user_home_to_configure }}"
-        USER: "{{ ansible_user_to_configure }}"
-      args:
-        # This makes the task idempotent: it only runs if rustc isn't already installed.
-        creates: "{{ user_home_to_configure }}/.cargo/bin/rustc"
-      register: rust_install_result
-      changed_when: "'Rust is installed now.' in rust_install_result.stdout or (rust_install_result.rc == 0 and not rust_install_result.stdout_lines | select('match', '.*already installed') | list)" # More robust changed detection
-      
+     ansible.builtin.shell:
+       cmd: "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
+     become: yes
+     become_user: "{{ ansible_user_to_configure }}"
+     
     # NVM and Node.js Installation
     - name: Check if NVM is already installed for user {{ ansible_user_to_configure }}
       ansible.builtin.stat:
