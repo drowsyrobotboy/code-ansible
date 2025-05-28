@@ -84,21 +84,15 @@
       become: yes
       become_user: "{{ ansible_user_to_configure }}"
       
-    # Go & Alacritty terminal installation
+    # Zig, Go & Alacritty terminal installation
     - name: Install Go and Alactritty from DNF
       ansible.builtin.dnf:
         name:
+          - zig                    # Zig Language
           - golang                 # Go language
           - alacritty              # Terminal emulator
         state: present
         
-   # Rust installation
-   - name: Install Rust for user {{ ansible_user_to_configure }}
-     ansible.builtin.shell:
-       cmd: "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
-     become: yes
-     become_user: "{{ ansible_user_to_configure }}"
-     
     # NVM and Node.js Installation
     - name: Check if NVM is already installed for user {{ ansible_user_to_configure }}
       ansible.builtin.stat:
