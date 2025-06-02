@@ -1,0 +1,220 @@
+---
+- name: Configure Fedora Desktop for robotboy-code
+  hosts: localhost
+  connection: local # Explicitly state local connection
+  become: yes # Most tasks require root privileges
+
+  vars:
+    target_hostname: robotboy-code
+    # User for whom user-specific configurations (like icons, docker group, NVM) will be applied.
+    # This is the user running the ansible-playbook command.
+    ansible_user_to_configure: "{{ lookup('env', 'USER') }}"
+    user_home_to_configure: "{{ lookup('env', 'HOME') }}"
+    nvm_version: "v0.40.3" # Specific NVM version from user request
+    node_version_to_install: "22" # Specific Node.js major version from user request
+
+  tasks:
+    - name: Ensure prerequisite packages for repository management are present
+      ansible.builtin.dnf:
+        name:
+          - dnf-plugins-core
+          - curl # Needed for downloading NVM script
+          - git # Needed by NVM install script
+        state: present
+
+    # 1. Set Hostname
+    - name: Set system hostname to {{ target_hostname }}
+      ansible.builtin.hostname:
+        name: "{{ target_hostname }}"
+      notify: Reboot system for hostname # Optional: notify a handler to reboot
+
+    # 5. Install Development Tools
+
+    # Git setup
+    - name: Set Git user name
+      ansible.builtin.command: git config --global user.name "drowsyrobotboy"
+      become: yes
+      become_user: "{{ ansible_user_to_configure }}"
+    
+    - name: Set Git user email
+      ansible.builtin.command: git config --global user.email "maruthisharma@live.in"
+      become: yes
+      become_user: "{{ ansible_user_to_configure }}"
+    
+    - name: Set Git default branch to main
+      ansible.builtin.command: git config --global init.defaultBranch main
+      become: yes
+      become_user: "{{ ansible_user_to_configure }}"
+
+      
+    # Zig, Go & Alacritty terminal installation
+    - name: Install Go and Alactritty from DNF
+      ansible.builtin.dnf:
+        name:
+          - zig                    # Zig Language
+          - golang                 # Go language
+        state: present
+
+    # Install Rust
+
+    - name: Check if Rust is already installed
+      ansible.builtin.command: rustc --version
+      register: rustc_check
+      ignore_errors: yes
+    
+    - name: Download and install Rust using rustup
+      ansible.builtin.shell: |
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+      args:
+        executable: /bin/bash
+      when: rustc_check.rc != 0
+      become: yes
+      become_user: "{{ ansible_user_to_configure }}"
+    
+    - name: Add cargo and rust to PATH (for current user session only)
+      ansible.builtin.lineinfile:
+        path: "/home/{{ ansible_user_to_configure }}/.bashrc"
+        line: 'export PATH="$HOME/.cargo/bin:$PATH"'
+        state: present
+        
+    # NVM and Node.js Installation
+    - name: Check if NVM is already installed for user {{ ansible_user_to_configure }}
+      ansible.builtin.stat:
+        path: "{{ user_home_to_configure }}/.nvm/nvm.sh"
+      register: nvm_script_stat
+      become: yes # stat might need to look into home dir if run as root initially
+      become_user: "{{ ansible_user_to_configure }}"
+
+    - name: Download NVM installation script (version {{ nvm_version }})
+      ansible.builtin.get_url:
+        url: "https://raw.githubusercontent.com/nvm-sh/nvm/{{ nvm_version }}/install.sh"
+        dest: "/tmp/nvm_install.sh"
+        mode: '0755'
+      when: not nvm_script_stat.stat.exists
+
+    - name: Run NVM installation script for user {{ ansible_user_to_configure }}
+      ansible.builtin.shell:
+        cmd: "bash /tmp/nvm_install.sh"
+      environment: # NVM script needs HOME to be set correctly for the target user
+        HOME: "{{ user_home_to_configure }}"
+      become: yes
+      become_user: "{{ ansible_user_to_configure }}"
+      args:
+        creates: "{{ user_home_to_configure }}/.nvm/nvm.sh" # Idempotency: only run if nvm.sh doesn't exist
+      when: not nvm_script_stat.stat.exists # Only run if NVM script was downloaded (implies NVM not installed)
+      register: nvm_install_script_result
+      changed_when: "'is already installed' not in nvm_install_script_result.stdout_lines | join(' ')" # Crude check for change
+
+    - name: Ensure NVM is sourced in .bashrc for user {{ ansible_user_to_configure }}
+      ansible.builtin.blockinfile:
+        path: "{{ user_home_to_configure }}/.bashrc" # Assumes bash shell
+        create: yes
+        owner: "{{ ansible_user_to_configure }}"
+        group: "{{ ansible_user_to_configure }}" # Assumes user's primary group
+        mode: '0644'
+        marker: "# {mark} ANSIBLE MANAGED NVM BLOCK"
+        block: |
+          export NVM_DIR="$HOME/.nvm"
+          [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"  # This loads nvm
+          [ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"  # This loads nvm bash_completion
+      become: yes # Ensures root can write/chown the file if needed
+      # become_user: "{{ ansible_user_to_configure }}" # owner/group params handle this if blockinfile runs as root
+
+    - name: Install Node.js v{{ node_version_to_install }} and set as default using NVM
+      ansible.builtin.shell:
+        cmd: |
+          export NVM_DIR="{{ user_home_to_configure }}/.nvm"
+          [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+          nvm install {{ node_version_to_install }}
+          nvm alias default {{ node_version_to_install }}
+      args:
+        executable: /bin/bash # Crucial for `source` (or `\.`) to work
+      become: yes
+      become_user: "{{ ansible_user_to_configure }}"
+      when: nvm_script_stat.stat.exists # Only run if NVM is actually installed
+      register: node_install_result
+      changed_when: "'is already installed' not in node_install_result.stdout and ('Now using node' in node_install_result.stdout or 'default -> {{ node_version_to_install }}' in node_install_result.stdout)"
+      notify: Development tools path info # Remind user about shell restart for PATH changes
+
+    - name: Clean up NVM installation script from /tmp
+      ansible.builtin.file:
+        path: "/tmp/nvm_install.sh"
+        state: absent
+      when: not nvm_script_stat.stat.exists # Only if we downloaded it in this run (idempotency)
+
+    # Docker
+    - name: Add Docker GPG key
+      ansible.builtin.rpm_key:
+        state: present
+        key: https://download.docker.com/linux/fedora/gpg
+    - name: Add Docker CE repository
+      ansible.builtin.yum_repository:
+        name: docker-ce-stable
+        description: Docker CE Stable
+        baseurl: "https://download.docker.com/linux/fedora/{{ ansible_distribution_major_version }}/$basearch/stable"
+        enabled: yes
+        gpgcheck: yes
+        gpgkey: https://download.docker.com/linux/fedora/gpg
+    - name: Install Docker components
+      ansible.builtin.dnf:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+    - name: Ensure Docker service is enabled and started
+      ansible.builtin.systemd:
+        name: docker
+        enabled: yes
+        state: started
+    - name: Add user {{ ansible_user_to_configure }} to docker group
+      ansible.builtin.user:
+        name: "{{ ansible_user_to_configure }}"
+        groups: docker
+        append: yes
+      notify: Docker group info # Notify user about logout/login
+
+    # Tailscale
+    - name: Add Tailscale repository
+      ansible.builtin.yum_repository:
+        name: tailscale-stable
+        description: Tailscale stable
+        baseurl: "https://pkgs.tailscale.com/stable/fedora/{{ ansible_distribution_major_version }}/$basearch"
+        enabled: yes
+        gpgcheck: yes
+        gpgkey: https://pkgs.tailscale.com/stable/fedora/repo.gpg
+    - name: Install Tailscale
+      ansible.builtin.dnf:
+        name: tailscale
+        state: present
+    - name: Ensure Tailscale service is enabled
+      ansible.builtin.systemd:
+        name: tailscaled
+        enabled: yes
+        # state: started # Starting tailscaled usually requires `tailscale up` interactively or with auth key.
+      notify: Tailscale setup info
+
+  handlers:
+    - name: Docker group info
+      ansible.builtin.debug:
+        msg: "User {{ ansible_user_to_configure }} has been added to the docker group. You may need to log out and log back in for this change to take effect."
+
+    - name: Tailscale setup info
+      ansible.builtin.debug:
+        msg: "Tailscale installed and service enabled. Run 'sudo tailscale up' to connect to your Tailnet."
+
+    - name: Development tools path info
+      ansible.builtin.debug:
+        msg: "NVM, Node.js, Rust, and Go have been installed. NVM has configured your .bashrc. You may need to restart your terminal or source your shell profile (e.g., .bashrc) for changes to be fully effective in your current shell."
+
+    - name: Reboot system for hostname
+      ansible.builtin.reboot:
+        msg: "Rebooting to apply hostname changes and complete setup."
+        connect_timeout: 5
+        reboot_timeout: 600
+        pre_reboot_delay: 0
+        post_reboot_delay: 30
+        test_command: whoami
+      when: false # Set to true if you want automatic reboot after hostname change. Defaulting to false.
