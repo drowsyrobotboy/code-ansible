@@ -8,6 +8,8 @@ After the initial installation, log in and use the command `sudo dnf install git
 3. Clone this Repository:`git clone https://github.com/drowsyrobotboy/code-ansible.git`
 4. Go to the newly cloned repository and create an ansible.log file `touch ansible.log`. Now tail it `tail -f ansible.log`
 5. In a parallel session, run Ansible Playbooks: `ansible-playbook fedora.yml -vvv -K >> ./ansible.log 2>&1` vvv is for more logging K is for root password prompt
+6. Once your reboot, Run `bash -c "$(curl -fsSL https://raw.githubusercontent.com/ohmybash/oh-my-bash/master/tools/install.sh)"`
+7. Then copy dotfiles folder to home folder
 
 Since `hosts: localhost` and `connection: local` are used, Ansible will apply the changes directly to the machine where you run the command.
 Most tasks require root privileges, so become: yes is used, and Ansible will likely prompt for your user's sudo password.
